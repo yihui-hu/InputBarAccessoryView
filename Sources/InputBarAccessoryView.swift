@@ -646,18 +646,26 @@ open class InputBarAccessoryView: UIView {
     /// - Parameters:
     ///   - animated: If the layout should be animated
     ///   - animations: Animation logic
-    internal func performLayout(_ animated: Bool, _ animations: @escaping () -> Void) {
+    internal func performLayout(
+        _ animated: Bool,
+        updates: @escaping () -> Void,
+        layout: (() -> Void)? = nil
+    ) {
         self.deactivateConstraints()
 
         if animated {
-            DispatchQueue.main.async {
-                UIView.animate(withDuration: 0.3, animations: animations)
+            UIView.animate(withDuration: 0.3) {
+                updates()
+                self.activateConstraints()
+                layout?()
             }
         } else {
-            UIView.performWithoutAnimation { animations() }
+            UIView.performWithoutAnimation {
+                updates()
+                self.activateConstraints()
+                layout?()
+            }
         }
-
-        self.activateConstraints()
     }
 
     /// Activates the NSLayoutConstraintSet's
@@ -696,10 +704,11 @@ open class InputBarAccessoryView: UIView {
         middleContentViewWrapper.contentView.addSubview(view)
         view.fillSuperview()
 
-        performLayout(animated) { [weak self] in
-            guard self?.superview != nil else { return }
-            self?.middleContentViewWrapper.layoutIfNeeded()
-            self?.invalidateIntrinsicContentSize()
+        performLayout(animated) {
+
+        } layout: {
+            self.middleContentViewWrapper.layoutIfNeeded()
+            self.invalidateIntrinsicContentSize()
         }
     }
 
@@ -787,9 +796,10 @@ open class InputBarAccessoryView: UIView {
     open func setLeftStackViewWidthConstant(to newValue: CGFloat, animated: Bool, animations : (() -> Void)? = nil) {
         performLayout(animated) {
             self.leftStackViewWidthConstant = newValue
+        } layout: {
+            animations?()
             self.layoutStackViews([.left])
             self.layoutContainerViewIfNeeded()
-            animations?()
         }
     }
 
@@ -802,9 +812,10 @@ open class InputBarAccessoryView: UIView {
     open func setRightStackViewWidthConstant(to newValue: CGFloat, animated: Bool, animations : (() -> Void)? = nil) {
         performLayout(animated) {
             self.rightStackViewWidthConstant = newValue
+        } layout: {
+            animations?()
             self.layoutStackViews([.right])
             self.layoutContainerViewIfNeeded()
-            animations?()
         }
     }
 
