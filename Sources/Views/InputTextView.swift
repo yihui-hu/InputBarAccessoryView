@@ -212,7 +212,18 @@ open class InputTextView: UITextView {
         placeholderLabelConstraintSet?.left?.constant = placeholderLabelInsets.left
         placeholderLabelConstraintSet?.right?.constant = -placeholderLabelInsets.right
     }
-    
+
+    open override func firstRect(for range: UITextRange) -> CGRect {
+        let rect = super.firstRect(for: range)
+        // If `layoutManager` is accessed, UITextView switches to TextKit1
+        // In iOS 27, UIKit has a bug with Siri writing tools where it requests a preview with
+        // range which can result in an invalid rect, so we need to validate it here as a fallback.
+        guard rect.isValidForLayout else {
+            return bounds
+        }
+        return rect
+    }
+
     // MARK: - Notifications
     
     private func postTextViewDidChangeNotification() {
@@ -406,3 +417,9 @@ open class InputTextView: UITextView {
     
 }
 
+private extension CGRect {
+
+    var isValidForLayout: Bool {
+        !isNull && !isInfinite && origin.x.isFinite && origin.y.isFinite && size.width.isFinite && size.height.isFinite
+    }
+}
