@@ -93,8 +93,10 @@ open class InputTextView: UITextView {
         }
     }
     
-    /// The UIEdgeInsets the placeholderLabel has within the InputTextView
-    open var placeholderLabelInsets: UIEdgeInsets = UIEdgeInsets(top: 8, left: 4, bottom: 8, right: 4) {
+    /// The UIEdgeInsets the placeholderLabel has within the InputTextView.
+    /// The horizontal defaults include the textContainer's lineFragmentPadding
+    /// so the placeholder sits exactly where the typed text will appear.
+    open var placeholderLabelInsets: UIEdgeInsets = UIEdgeInsets(top: 8, left: 5, bottom: 8, right: 5) {
         didSet {
             updateConstraintsForPlaceholderLabel()
         }
@@ -117,7 +119,12 @@ open class InputTextView: UITextView {
     /// The textContainerInset of the InputTextView. When set the placeholderLabelInsets is also updated
     open override var textContainerInset: UIEdgeInsets {
         didSet {
-            placeholderLabelInsets = textContainerInset
+            placeholderLabelInsets = UIEdgeInsets(
+                top: textContainerInset.top,
+                left: textContainerInset.left + textContainer.lineFragmentPadding,
+                bottom: textContainerInset.bottom,
+                right: textContainerInset.right + textContainer.lineFragmentPadding
+            )
         }
     }
     
@@ -140,16 +147,36 @@ open class InputTextView: UITextView {
     private var placeholderLabelConstraintSet: NSLayoutConstraintSet?
  
     // MARK: - Initializers
-    
+
+    /// Keeps the manually built TextKit 1 stack's NSTextStorage alive:
+    /// TextKit's back-references are weak, so the view must retain it.
+    private var retainedTextStorage: NSTextStorage?
+
     public convenience init() {
-        self.init(frame: .zero)
+        // TextKit 1 is required: paragraph styles pinning
+        // minimumLineHeight == maximumLineHeight together with .baselineOffset
+        // are dropped by TextKit 2's layout manager.
+        //
+        // Do NOT use init(usingTextLayoutManager:) here — it bypasses the
+        // subclass's designated initializer, leaving Swift stored properties
+        // (placeholderLabel, insets, ...) uninitialized. An explicit
+        // NSTextContainer through the designated init forces TextKit 1 while
+        // initializing properties normally.
+        let textStorage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        let textContainer = NSTextContainer(size: .zero)
+        textContainer.widthTracksTextView = true
+        layoutManager.addTextContainer(textContainer)
+        textStorage.addLayoutManager(layoutManager)
+        self.init(frame: .zero, textContainer: textContainer)
+        retainedTextStorage = textStorage
     }
-    
+
     public override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
         setup()
     }
-    
+
     required public init?(coder aDecoder: NSCoder) {
         super.init(coder: aDecoder)
         setup()
@@ -160,13 +187,18 @@ open class InputTextView: UITextView {
     }
     
     // MARK: - Setup
-    
+
     /// Sets up the default properties
     open func setup() {
-        
+
         backgroundColor = .clear
         font = UIFont.preferredFont(forTextStyle: .body)
         isScrollEnabled = false
+        // Non-contiguous layout (UITextView's default) does not reliably
+        // produce the extra line fragment for a trailing newline, which
+        // misplaces the caret on the empty last line and breaks line-count
+        // sizing. Documents here are small; contiguous layout is cheap.
+        layoutManager.allowsNonContiguousLayout = false
         scrollIndicatorInsets = UIEdgeInsets(top: .leastNonzeroMagnitude,
                                              left: .leastNonzeroMagnitude,
                                              bottom: .leastNonzeroMagnitude,
@@ -176,6 +208,12 @@ open class InputTextView: UITextView {
     }
     
     /// Adds the placeholderLabel to the view and sets up its initial constraints
+    ///
+    /// NOTE: with a fixed line height (see `fixedLineHeight`), give the label
+    /// attributed text carrying the same line height, so the height these
+    /// pins impose while the view is empty exactly equals the one-line
+    /// fitting height while typing — otherwise the first character would
+    /// shift the layout.
     private func setupPlaceholderLabel() {
 
         addSubview(placeholderLabel)
@@ -234,14 +272,85 @@ open class InputTextView: UITextView {
     private func textViewTextDidChange() {
         let isPlaceholderHidden = !text.isEmpty
         placeholderLabel.isHidden = isPlaceholderHidden
-        // Adjust constraints to prevent unambiguous content size
+        // Adjust constraints to prevent ambiguous content size
         if isPlaceholderHidden {
             placeholderLabelConstraintSet?.deactivate()
         } else {
             placeholderLabelConstraintSet?.activate()
         }
     }
-    
+
+    // MARK: - Fixed Line-Height Sizing
+
+    /// The fixed line height carried by `typingAttributes`, when their
+    /// paragraph style pins `minimumLineHeight == maximumLineHeight`.
+    public var fixedLineHeight: CGFloat? {
+        guard let style = typingAttributes[.paragraphStyle] as? NSParagraphStyle,
+              style.minimumLineHeight > 0,
+              style.minimumLineHeight == style.maximumLineHeight
+        else { return nil }
+        return style.minimumLineHeight
+    }
+
+    /// Height fitting the current text as `lineCount × fixedLineHeight` plus
+    /// the vertical `textContainerInset`, aligned up to the pixel grid.
+    /// `nil` when no fixed line height is in effect.
+    ///
+    /// Deriving the height from the line count makes it a step function of
+    /// the text: it can only change when a line wraps in or out, so sub-point
+    /// measurement noise can never resize the view while typing. The trailing
+    /// caret line (TextKit's extra line fragment, which is otherwise measured
+    /// at the font's natural height) counts as one full line.
+    public func fixedLineHeightFittingHeight() -> CGFloat? {
+        guard let lineHeight = fixedLineHeight else { return nil }
+        let verticalInset = textContainerInset.top + textContainerInset.bottom
+        guard bounds.width > 0 else {
+            // Not laid out yet: wrapping is unknowable, so count paragraphs.
+            let newlineCount = text.unicodeScalars.lazy.filter { $0 == "\n" }.count
+            return pixelAligned(verticalInset + CGFloat(newlineCount + 1) * lineHeight)
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        var lineCount = 0
+        var glyphIndex = 0
+        let numberOfGlyphs = layoutManager.numberOfGlyphs
+        while glyphIndex < numberOfGlyphs {
+            var lineRange = NSRange(location: NSNotFound, length: 0)
+            layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: &lineRange)
+            lineCount += 1
+            glyphIndex = NSMaxRange(lineRange)
+        }
+        if numberOfGlyphs == 0 || text.hasSuffix("\n") {
+            lineCount += 1
+        }
+        return pixelAligned(verticalInset + CGFloat(lineCount) * lineHeight)
+    }
+
+    /// The tallest height at or below `maxHeight` showing only complete lines
+    /// of the fixed line height. `nil` when no fixed line height is in effect.
+    public func fixedLineHeightCap(below maxHeight: CGFloat) -> CGFloat? {
+        guard let lineHeight = fixedLineHeight else { return nil }
+        let verticalInset = textContainerInset.top + textContainerInset.bottom
+        let lineCount = max(1, ((maxHeight - verticalInset) / lineHeight).rounded(.down))
+        return pixelAligned(verticalInset + lineCount * lineHeight)
+    }
+
+    private func pixelAligned(_ height: CGFloat) -> CGFloat {
+        let scale = traitCollection.displayScale > 0
+            ? traitCollection.displayScale
+            : UIScreen.main.scale
+        return (height * scale).rounded(.up) / scale
+    }
+
+    /// With a fixed line height the intrinsic height must be the exact same
+    /// quantized value the InputBarAccessoryView allocates for the text view,
+    /// so the two never disagree by a fraction of a point.
+    open override var intrinsicContentSize: CGSize {
+        guard !isScrollEnabled, let height = fixedLineHeightFittingHeight() else {
+            return super.intrinsicContentSize
+        }
+        return CGSize(width: UIView.noIntrinsicMetric, height: height)
+    }
+
     // MARK: - Image Paste Support
     
     open override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {

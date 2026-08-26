@@ -141,7 +141,12 @@ open class AutocompleteManager: NSObject, InputPlugin, UITextViewDelegate, UITab
         var attributes = defaultTextAttributes
         attributes[.autocompleted] = false
         attributes[.autocompletedContext] = nil
-        attributes[.paragraphStyle] = paragraphStyle
+        // A paragraph style supplied via defaultTextAttributes (e.g. one
+        // carrying a fixed line height) must survive; only fall back to the
+        // manager's own style when the caller didn't provide one.
+        if attributes[.paragraphStyle] == nil {
+            attributes[.paragraphStyle] = paragraphStyle
+        }
         return attributes
     }
     

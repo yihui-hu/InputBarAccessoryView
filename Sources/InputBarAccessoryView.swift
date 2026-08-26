@@ -285,6 +285,12 @@ open class InputBarAccessoryView: UIView {
         guard middleContentView == inputTextView else {
             return middleContentView?.intrinsicContentSize.height ?? 0
         }
+        // With a fixed line height the quantized measure is authoritative: it
+        // matches the text view's own intrinsicContentSize exactly, leaving no
+        // sub-point slack for the layout to absorb.
+        if let quantizedHeight = inputTextView.fixedLineHeightFittingHeight() {
+            return quantizedHeight
+        }
         let maxTextViewSize = CGSize(width: inputTextView.bounds.width, height: .greatestFiniteMagnitude)
         return inputTextView.sizeThatFits(maxTextViewSize).height.rounded(.down)
     }
@@ -609,10 +615,12 @@ open class InputBarAccessoryView: UIView {
     ///
     /// - Returns: Max Height
     open func calculateMaxTextViewHeight() -> CGFloat {
-        if traitCollection.verticalSizeClass == .regular {
-            return (UIScreen.main.bounds.height / 3).rounded(.down)
-        }
-        return (UIScreen.main.bounds.height / 5).rounded(.down)
+        let screenBound = traitCollection.verticalSizeClass == .regular
+            ? (UIScreen.main.bounds.height / 3).rounded(.down)
+            : (UIScreen.main.bounds.height / 5).rounded(.down)
+        // With a fixed line height, cap at a whole number of lines so the
+        // scroll-threshold state also shows only complete lines.
+        return inputTextView.fixedLineHeightCap(below: screenBound) ?? screenBound
     }
 
     // MARK: - Layout Helper Methods
