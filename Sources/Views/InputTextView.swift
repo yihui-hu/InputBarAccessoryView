@@ -41,14 +41,35 @@ open class InputTextView: UITextView {
     
     // MARK: - Properties
     
+    /// UIKit resets `typingAttributes` whenever `text`/`attributedText` is
+    /// assigned programmatically, which would silently drop a configured
+    /// fixed-line-height paragraph style until the next keystroke restores
+    /// it — and any layout in between would measure with the wrong metrics.
+    /// Both setters below restore the pre-assignment typing attributes.
+    private var typingAttributesBeforeAssignment: [NSAttributedString.Key: Any]?
+
     open override var text: String! {
+        willSet {
+            typingAttributesBeforeAssignment = typingAttributes
+        }
         didSet {
+            if let preserved = typingAttributesBeforeAssignment {
+                typingAttributes = preserved
+                typingAttributesBeforeAssignment = nil
+            }
             postTextViewDidChangeNotification()
         }
     }
-    
+
     open override var attributedText: NSAttributedString! {
+        willSet {
+            typingAttributesBeforeAssignment = typingAttributes
+        }
         didSet {
+            if let preserved = typingAttributesBeforeAssignment {
+                typingAttributes = preserved
+                typingAttributesBeforeAssignment = nil
+            }
             postTextViewDidChangeNotification()
         }
     }
@@ -209,11 +230,12 @@ open class InputTextView: UITextView {
     
     /// Adds the placeholderLabel to the view and sets up its initial constraints
     ///
-    /// NOTE: with a fixed line height (see `fixedLineHeight`), give the label
-    /// attributed text carrying the same line height, so the height these
-    /// pins impose while the view is empty exactly equals the one-line
-    /// fitting height while typing — otherwise the first character would
-    /// shift the layout.
+    /// NOTE: with fixed line metrics (see `fixedLineMetrics`), style the
+    /// label so its height matches one line of the input text (same font
+    /// for the lineSpacing shape; same attributed line height for the
+    /// min/max shape) — then the height these pins impose while the view
+    /// is empty equals the one-line fitting height while typing, and the
+    /// first character cannot shift the layout.
     private func setupPlaceholderLabel() {
 
         addSubview(placeholderLabel)
@@ -263,8 +285,17 @@ open class InputTextView: UITextView {
     }
 
     // MARK: - Notifications
-    
+
+    /// Programmatic `text`/`attributedText` assignments normally broadcast
+    /// `UITextView.textDidChangeNotification` (see the property overrides).
+    /// Set this while making a transient assignment that observers must not
+    /// react to — e.g. AutocompleteManager's momentary clear before an
+    /// insertion, which would otherwise run the input bar's height pipeline
+    /// against an empty document.
+    var suppressesTextDidChangeBroadcast = false
+
     private func postTextViewDidChangeNotification() {
+        guard !suppressesTextDidChangeBroadcast else { return }
         NotificationCenter.default.post(name: UITextView.textDidChangeNotification, object: self)
     }
     
@@ -282,14 +313,46 @@ open class InputTextView: UITextView {
 
     // MARK: - Fixed Line-Height Sizing
 
-    /// The fixed line height carried by `typingAttributes`, when their
-    /// paragraph style pins `minimumLineHeight == maximumLineHeight`.
+    /// Deterministic per-line metrics derived from the text attributes:
+    /// the line pitch (baseline-to-baseline distance) and the trailing gap
+    /// below the last line. Two attribute shapes produce fixed metrics —
+    /// a paragraph style pinning `minimumLineHeight == maximumLineHeight`
+    /// (pitch = that height, no trailing gap), or natural font metrics
+    /// with `lineSpacing` (pitch = font lineHeight + spacing, trailing
+    /// gap = spacing).
+    struct FixedLineMetrics: Equatable {
+        var pitch: CGFloat
+        var trailingGap: CGFloat
+    }
+
+    /// Reads `typingAttributes` first, falling back to the document's own
+    /// attributes so sizing cannot disengage while styled text is present,
+    /// even if UIKit transiently resets the typing attributes.
+    var fixedLineMetrics: FixedLineMetrics? {
+        if let metrics = Self.fixedLineMetrics(in: typingAttributes) {
+            return metrics
+        }
+        guard let attributedText, attributedText.length > 0 else { return nil }
+        return Self.fixedLineMetrics(in: attributedText.attributes(at: 0, effectiveRange: nil))
+    }
+
+    /// The fixed line pitch, when one is in effect.
     public var fixedLineHeight: CGFloat? {
-        guard let style = typingAttributes[.paragraphStyle] as? NSParagraphStyle,
-              style.minimumLineHeight > 0,
-              style.minimumLineHeight == style.maximumLineHeight
-        else { return nil }
-        return style.minimumLineHeight
+        fixedLineMetrics?.pitch
+    }
+
+    private static func fixedLineMetrics(in attributes: [NSAttributedString.Key: Any]) -> FixedLineMetrics? {
+        guard let style = attributes[.paragraphStyle] as? NSParagraphStyle else { return nil }
+        // A minimum line height taller than the font's natural height fixes
+        // the pitch on its own (with or without a matching maximum).
+        if style.minimumLineHeight > 0,
+           style.maximumLineHeight == 0 || style.maximumLineHeight == style.minimumLineHeight {
+            return FixedLineMetrics(pitch: style.minimumLineHeight, trailingGap: 0)
+        }
+        if style.lineSpacing > 0, let font = attributes[.font] as? UIFont {
+            return FixedLineMetrics(pitch: font.lineHeight + style.lineSpacing, trailingGap: style.lineSpacing)
+        }
+        return nil
     }
 
     /// Height fitting the current text as `lineCount × fixedLineHeight` plus
@@ -302,12 +365,15 @@ open class InputTextView: UITextView {
     /// caret line (TextKit's extra line fragment, which is otherwise measured
     /// at the font's natural height) counts as one full line.
     public func fixedLineHeightFittingHeight() -> CGFloat? {
-        guard let lineHeight = fixedLineHeight else { return nil }
+        guard let metrics = fixedLineMetrics else { return nil }
         let verticalInset = textContainerInset.top + textContainerInset.bottom
+        func height(forLineCount lineCount: Int) -> CGFloat {
+            pixelAligned(verticalInset + CGFloat(lineCount) * metrics.pitch - metrics.trailingGap)
+        }
         guard bounds.width > 0 else {
             // Not laid out yet: wrapping is unknowable, so count paragraphs.
             let newlineCount = text.unicodeScalars.lazy.filter { $0 == "\n" }.count
-            return pixelAligned(verticalInset + CGFloat(newlineCount + 1) * lineHeight)
+            return height(forLineCount: newlineCount + 1)
         }
         layoutManager.ensureLayout(for: textContainer)
         var lineCount = 0
@@ -322,16 +388,16 @@ open class InputTextView: UITextView {
         if numberOfGlyphs == 0 || text.hasSuffix("\n") {
             lineCount += 1
         }
-        return pixelAligned(verticalInset + CGFloat(lineCount) * lineHeight)
+        return height(forLineCount: lineCount)
     }
 
     /// The tallest height at or below `maxHeight` showing only complete lines
     /// of the fixed line height. `nil` when no fixed line height is in effect.
     public func fixedLineHeightCap(below maxHeight: CGFloat) -> CGFloat? {
-        guard let lineHeight = fixedLineHeight else { return nil }
+        guard let metrics = fixedLineMetrics else { return nil }
         let verticalInset = textContainerInset.top + textContainerInset.bottom
-        let lineCount = max(1, ((maxHeight - verticalInset) / lineHeight).rounded(.down))
-        return pixelAligned(verticalInset + lineCount * lineHeight)
+        let lineCount = max(1, ((maxHeight - verticalInset + metrics.trailingGap) / metrics.pitch).rounded(.down))
+        return pixelAligned(verticalInset + lineCount * metrics.pitch - metrics.trailingGap)
     }
 
     private func pixelAligned(_ height: CGFloat) -> CGFloat {
@@ -349,6 +415,56 @@ open class InputTextView: UITextView {
             return super.intrinsicContentSize
         }
         return CGSize(width: UIView.noIntrinsicMetric, height: height)
+    }
+
+    // MARK: - Caret & Selection Geometry
+
+    /// TextKit bottom-aligns the glyph block inside a line box enlarged by
+    /// `minimumLineHeight`, and system caret/selection rects span the full
+    /// line fragment — leaving all of the extra height hanging above the
+    /// glyphs. Recenter them: the caret hugs the glyph block (like a plain
+    /// text field), and selection keeps the full line pitch so multi-line
+    /// selections stay contiguous, shifted to leave an even halo.
+
+    open override func caretRect(for position: UITextPosition) -> CGRect {
+        var rect = super.caretRect(for: position)
+        guard let metrics = fixedLineMetrics, let font,
+              metrics.pitch > font.lineHeight
+        else { return rect }
+        // Also aligns the caret on an empty line (TextKit's extra line
+        // fragment has the font's natural height, sitting high) with where
+        // the glyph block of typed text will land.
+        rect.origin.y += metrics.pitch - font.lineHeight
+        rect.size.height = font.lineHeight
+        return rect
+    }
+
+    open override func selectionRects(for range: UITextRange) -> [UITextSelectionRect] {
+        let rects = super.selectionRects(for: range)
+        guard let metrics = fixedLineMetrics, let font,
+              metrics.pitch > font.lineHeight
+        else { return rects }
+        let shift = (metrics.pitch - font.lineHeight) / 2
+        return rects.map { base in
+            guard base.rect.height > font.lineHeight - 0.5 else { return base }
+            return RecenteredSelectionRect(base: base, rect: base.rect.offsetBy(dx: 0, dy: shift))
+        }
+    }
+
+    private final class RecenteredSelectionRect: UITextSelectionRect {
+        private let base: UITextSelectionRect
+        private let recenteredRect: CGRect
+
+        init(base: UITextSelectionRect, rect: CGRect) {
+            self.base = base
+            self.recenteredRect = rect
+        }
+
+        override var rect: CGRect { recenteredRect }
+        override var writingDirection: NSWritingDirection { base.writingDirection }
+        override var containsStart: Bool { base.containsStart }
+        override var containsEnd: Bool { base.containsEnd }
+        override var isVertical: Bool { base.isVertical }
     }
 
     // MARK: - Image Paste Support

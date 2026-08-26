@@ -234,7 +234,15 @@ open class AutocompleteManager: NSObject, InputPlugin, UITextViewDelegate, UITab
     open func register(prefix: String, with attributedTextAttributes: [NSAttributedString.Key:Any]? = nil) {
         autocompletePrefixes.insert(prefix)
         autocompleteTextAttributes[prefix] = attributedTextAttributes
-        autocompleteTextAttributes[prefix]?[.paragraphStyle] = paragraphStyle
+        // A caller-provided paragraph style must survive: replacing it with
+        // the manager's own would give inserted completions a paragraph
+        // style that differs from the surrounding text, and UIKit's
+        // fixAttributes then normalizes the WHOLE paragraph to the style of
+        // its first character — silently changing line metrics whenever a
+        // completion lands at the start of a paragraph.
+        if autocompleteTextAttributes[prefix]?[.paragraphStyle] == nil {
+            autocompleteTextAttributes[prefix]?[.paragraphStyle] = paragraphStyle
+        }
     }
     
     /// Unregisters a prefix and removes its associated cached attributes
@@ -359,8 +367,15 @@ open class AutocompleteManager: NSObject, InputPlugin, UITextViewDelegate, UITab
                                        value: UIColor.clear,
                                        range: NSMakeRange(0, newAttributedText.length))
         
-        // Set to a blank attributed string to prevent keyboard autocorrect from cloberring the insert
+        // Set to a blank attributed string to prevent keyboard autocorrect from cloberring the insert.
+        // The transient empty state must not broadcast textDidChange: observers
+        // (the input bar's height pipeline, placeholder, send button) would
+        // react to an empty document, and because the text view's bounds only
+        // catch up after a layout pass, the immediate restore can be mistaken
+        // for "no change" — leaving a stale intrinsic-size cache behind.
+        (textView as? InputTextView)?.suppressesTextDidChangeBroadcast = true
         textView.attributedText = NSAttributedString()
+        (textView as? InputTextView)?.suppressesTextDidChangeBroadcast = false
 
         textView.attributedText = newAttributedText
     }

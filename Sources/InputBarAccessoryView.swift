@@ -897,8 +897,11 @@ open class InputBarAccessoryView: UIView {
             sendButton.isEnabled = isEnabled
         }
 
-        // Capture change before iterating over the InputItem's
-        let shouldInvalidateIntrinsicContentSize = requiredInputTextViewHeight != inputTextView.bounds.height
+        // Compare the freshly calculated size against the cache rather than
+        // against the text view's bounds: bounds lag the pending layout pass,
+        // so after a programmatic clear-and-restore the restored text can
+        // match the stale bounds and a needed cache update would be skipped.
+        let shouldInvalidateIntrinsicContentSize = calculateIntrinsicContentSize() != cachedIntrinsicContentSize
 
         items.forEach { $0.textViewDidChangeAction(with: self.inputTextView) }
         delegate?.inputBar(self, textViewTextDidChangeTo: inputTextView.text ?? "")
