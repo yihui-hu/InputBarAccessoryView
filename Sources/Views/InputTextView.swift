@@ -480,7 +480,17 @@ open class InputTextView: UITextView {
     open override func paste(_ sender: Any?) {
         
         guard isImagePasteEnabled, let image = UIPasteboard.general.image else {
-            return super.paste(sender)
+            guard let string = pastedPlainText else {
+                return super.paste(sender)
+            }
+            // UIKit's paste goes through its asynchronous paste coordinator,
+            // which inserts an attributed string outside the typing path;
+            // pasting into the comment input left the caret at a stale
+            // rect. Inserting the plain text as typed keeps the typing
+            // attributes, the delegate callbacks, undo, and the caret at
+            // the end of the insertion.
+            insertText(string)
+            return
         }
         for plugin in inputBarAccessoryView?.inputPlugins ?? [] {
             if plugin.handleInput(of: image) {
@@ -488,6 +498,16 @@ open class InputTextView: UITextView {
             }
         }
         pasteImageInTextContainer(with: image)
+    }
+    
+    /// The pasteboard's text, with a bare URL item read as its string.
+    /// `nil` for non-text content, which falls back to the system paste.
+    private var pastedPlainText: String? {
+        let pasteboard = UIPasteboard.general
+        if let string = pasteboard.string, !string.isEmpty {
+            return string
+        }
+        return pasteboard.url?.absoluteString
     }
     
     /// Addes a new UIImage to the NSTextContainer as an NSTextAttachment
