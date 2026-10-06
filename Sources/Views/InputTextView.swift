@@ -185,7 +185,7 @@ open class InputTextView: UITextView {
         // initializing properties normally.
         let textStorage = NSTextStorage()
         let layoutManager = NSLayoutManager()
-        let textContainer = NSTextContainer(size: .zero)
+        let textContainer = UnboundedHeightTextContainer(size: .zero)
         textContainer.widthTracksTextView = true
         layoutManager.addTextContainer(textContainer)
         textStorage.addLayoutManager(layoutManager)
@@ -482,17 +482,7 @@ open class InputTextView: UITextView {
     open override func paste(_ sender: Any?) {
         
         guard isImagePasteEnabled, let image = UIPasteboard.general.image else {
-            guard let string = pastedPlainText else {
-                return super.paste(sender)
-            }
-            // UIKit's paste goes through its asynchronous paste coordinator,
-            // which inserts an attributed string outside the typing path;
-            // pasting into the comment input left the caret at a stale
-            // rect. Inserting the plain text as typed keeps the typing
-            // attributes, the delegate callbacks, undo, and the caret at
-            // the end of the insertion.
-            insertText(string)
-            return
+            return super.paste(sender)
         }
         for plugin in inputBarAccessoryView?.inputPlugins ?? [] {
             if plugin.handleInput(of: image) {
@@ -500,16 +490,6 @@ open class InputTextView: UITextView {
             }
         }
         pasteImageInTextContainer(with: image)
-    }
-    
-    /// The pasteboard's text, with a bare URL item read as its string.
-    /// `nil` for non-text content, which falls back to the system paste.
-    private var pastedPlainText: String? {
-        let pasteboard = UIPasteboard.general
-        if let string = pasteboard.string, !string.isEmpty {
-            return string
-        }
-        return pasteboard.url?.absoluteString
     }
     
     /// Addes a new UIImage to the NSTextContainer as an NSTextAttachment
@@ -662,6 +642,22 @@ open class InputTextView: UITextView {
         layoutManager.invalidateLayout(forCharacterRange: range, actualCharacterRange: nil)
     }
     
+}
+
+/// UITextView clamps a non-scrolling text view's container height to its
+/// bounds and only unbounds it inside its own `sizeThatFits`, so text past
+/// the current height is never laid out. The line counting in
+/// `fixedLineHeightFittingHeight()` and caret rects read the live layout:
+/// a paste that wraps to three lines into a one-line view counted the one
+/// fitted line plus a single overflow fragment, sized the bar for two, and
+/// drew the caret for an unlaid glyph at the origin. Keeping the height
+/// unbounded lays out the whole document, as a scrolling text view does.
+///
+private final class UnboundedHeightTextContainer: NSTextContainer {
+    override var size: CGSize {
+        get { super.size }
+        set { super.size = CGSize(width: newValue.width, height: .greatestFiniteMagnitude) }
+    }
 }
 
 private extension CGRect {
